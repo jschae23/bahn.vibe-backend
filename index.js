@@ -9,23 +9,33 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(bodyParser.json());
 
-const STATION_MAPPING = {
-  'München': 'A=1@O=München Hbf@X=11558339@Y=48140229@U=80@L=8000261@B=1@p=1751482402@i=U×008020347@',
-  'Nürnberg': 'A=1@O=NÜRNBERG@X=11077955@Y=49450748@U=80@L=8096025@B=1@p=1751482402@i=U×008022198@',
-  // Add more stations as needed
-};
-
-function getStationId(cityName) {
-  return STATION_MAPPING[cityName] || cityName;
-}
-
-function getStationDisplayName(cityName) {
-  // For display purposes
-  const mapping = {
-    'München': 'München Hbf',
-    'Nürnberg': 'NÜRNBERG'
-  };
-  return mapping[cityName] || cityName;
+// Dynamic station search function
+async function searchBahnhof(search) {
+  if (!search) return null;
+  try {
+    const encodedSearch = encodeURIComponent(search);
+    const url = `https://www.bahn.de/web/api/reiseloesung/orte?suchbegriff=${encodedSearch}&typ=ALL&limit=10`;
+    console.log(`Searching station: "${search}"`);
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0",
+        Accept: "application/json",
+        "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
+        Referer: "https://www.bahn.de/",
+      },
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    if (!data || data.length === 0) return null;
+    const station = data[0];
+    const id = station.id;
+    console.log(`Found station: ${station.name} with original ID: ${id}`);
+    // DON'T normalize the ID - use it as-is like the working curl
+    return { id: id, name: station.name };
+  } catch (error) {
+    console.error("Error in searchBahnhof:", error);
+    return null;
+  }
 }
 
 // Modified getBestPrice function to return single date result
@@ -214,9 +224,18 @@ function generateDateArray(startDate, dayLimit) {
 async function searchPrices(requestData) {
   const { start, ziel, abfahrtab, klasse, schnelleVerbindungen, nurDeutschlandTicketVerbindungen, maximaleUmstiege, dayLimit } = requestData;
   
-  // Convert city names to station IDs
-  const startStationId = getStationId(start);
-  const zielStationId = getStationId(ziel);
+  // Search for stations dynamically
+  console.log(`Searching for start station: ${start}`);
+  const startStation = await searchBahnhof(start);
+  if (!startStation) {
+    throw new Error(`Start station "${start}" not found`);
+  }
+  
+  console.log(`Searching for destination station: ${ziel}`);
+  const zielStation = await searchBahnhof(ziel);
+  if (!zielStation) {
+    throw new Error(`Destination station "${ziel}" not found`);
+  }
   
   // Generate dates array
   const dates = generateDateArray(abfahrtab, dayLimit || 3);
@@ -226,8 +245,8 @@ async function searchPrices(requestData) {
   // Process each date
   for (const date of dates) {
     const config = {
-      abfahrtsHalt: startStationId,
-      ankunftsHalt: zielStationId,
+      abfahrtsHalt: startStation.id,
+      ankunftsHalt: zielStation.id,
       anfrageZeitpunkt: date,
       klasse: klasse,
       maximaleUmstiege: maximaleUmstiege,
@@ -243,12 +262,12 @@ async function searchPrices(requestData) {
   // Add metadata
   results._meta = {
     startStation: {
-      id: startStationId,
-      name: getStationDisplayName(start)
+      id: startStation.id,
+      name: startStation.name
     },
     zielStation: {
-      id: zielStationId,
-      name: getStationDisplayName(ziel)
+      id: zielStation.id,
+      name: zielStation.name
     },
     searchParams: {
       klasse: klasse,
@@ -260,6 +279,36 @@ async function searchPrices(requestData) {
   
   return results;
 }
+
+// Express route handler for station search
+app.get('/api/search-station', async (req, res) => {
+  try {
+    const { query } = req.query;
+    
+    if (!query) {
+      return res.status(400).json({ 
+        error: 'Missing query parameter' 
+      });
+    }
+    
+    const station = await searchBahnhof(query);
+    
+    if (!station) {
+      return res.status(404).json({ 
+        error: 'Station not found' 
+      });
+    }
+    
+    res.json(station);
+    
+  } catch (error) {
+    console.error('Error in search-station endpoint:', error);
+    res.status(500).json({ 
+      error: 'Internal server error',
+      message: error.message 
+    });
+  }
+});
 
 // Express route handler for the /api/search-prices endpoint
 app.post('/api/search-prices', async (req, res) => {
@@ -289,8 +338,6 @@ app.post('/api/search-prices', async (req, res) => {
   }
 });
 
-
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });
-
